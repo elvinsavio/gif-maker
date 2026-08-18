@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from functools import wraps
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from flask import (
     session,
     url_for,
 )
+from PIL import Image
 from werkzeug.utils import secure_filename
 
 load_dotenv()
@@ -44,6 +46,10 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
+
+THUMB_COUNT = 40
+THUMB_W = 100
+THUMB_H = 56
 
 
 # ---------------------------------------------------------------- helpers --
@@ -89,6 +95,46 @@ def current_video_path():
     for f in UPLOAD_DIR.glob("video.*"):
         return f
     return None
+
+
+def thumbs_path():
+    return UPLOAD_DIR / "thumbs.jpg"
+
+
+def clear_thumbs():
+    thumbs_path().unlink(missing_ok=True)
+
+
+def generate_thumbnails(video_path, duration):
+    """Build a single horizontal filmstrip sprite (THUMB_COUNT frames tiled
+    side by side) for the trim timeline. Frames are extracted in parallel
+    since each ffmpeg call is a cheap single-frame seek-and-grab."""
+    if not FFMPEG or not duration or duration <= 0:
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        def grab(i):
+            t = duration * i / THUMB_COUNT
+            out = Path(tmp) / f"{i:03d}.jpg"
+            cmd = [
+                FFMPEG, "-y", "-ss", str(t), "-i", str(video_path),
+                "-frames:v", "1", "-vf", f"scale={THUMB_W}:{THUMB_H}",
+                "-q:v", "4", str(out),
+            ]
+            subprocess.run(cmd, capture_output=True, timeout=15)
+            return out if out.exists() else None
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            frames = list(pool.map(grab, range(THUMB_COUNT)))
+        frames = [f for f in frames if f]
+        if not frames:
+            return
+
+        sprite = Image.new("RGB", (THUMB_W * len(frames), THUMB_H), "black")
+        for i, frame in enumerate(frames):
+            with Image.open(frame) as im:
+                sprite.paste(im, (i * THUMB_W, 0))
+        sprite.save(thumbs_path(), "JPEG", quality=72)
 
 
 def video_duration(path):
@@ -168,6 +214,7 @@ def index():
         "index.html",
         has_video=bool(video),
         duration=duration,
+        has_thumbs=thumbs_path().is_file(),
         ffmpeg_ok=bool(FFMPEG and FFPROBE),
     )
 
@@ -188,9 +235,11 @@ def upload():
 
     for old in UPLOAD_DIR.glob("video.*"):
         old.unlink(missing_ok=True)
+    clear_thumbs()
 
     dest = UPLOAD_DIR / f"video.{ext}"
     file.save(dest)
+    generate_thumbnails(dest, video_duration(dest))
     flash("Video uploaded.")
     return redirect_to_index()
 
@@ -201,8 +250,17 @@ def clear_all():
     check_csrf()
     for f in UPLOAD_DIR.glob("video.*"):
         f.unlink(missing_ok=True)
+    clear_thumbs()
     flash("Cleared.")
     return redirect_to_index()
+
+
+@app.route("/thumbnails")
+@login_required
+def serve_thumbnails():
+    if not thumbs_path().is_file():
+        abort(404)
+    return send_from_directory(UPLOAD_DIR, "thumbs.jpg", conditional=True)
 
 
 @app.route("/video")

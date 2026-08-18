@@ -59,26 +59,18 @@
 
   <video id="video" class="w-full border-2 border-white/30 mb-2 cursor-pointer" src="{{ url_for('serve_video') }}" muted playsinline preload="metadata"></video>
 
-  <div id="overview-wrap" class="mb-2">
-    <div class="flex items-center gap-2">
-      <div class="flex items-center gap-1 shrink-0 text-xs">
-        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="-30">-30</button>
-        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="-5">-5</button>
-      </div>
-      <div class="relative flex-1" id="overview-track">
-        <div id="overview-highlight" class="absolute top-0 h-full bg-white/25 pointer-events-none"></div>
-        <div class="ns-slider" id="overview-slider"></div>
-      </div>
-      <div class="flex items-center gap-1 shrink-0 text-xs">
-        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="5">+5</button>
-        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="30">+30</button>
-      </div>
-    </div>
-    <div class="text-xs text-white/50 mt-1">zoomed to <span id="zoom-range-label">00.0&ndash;00.0</span></div>
+  <div class="flex items-center gap-2 mb-1 text-xs text-white/50">
+    <span class="shrink-0">zoom</span>
+    <input type="range" id="zoom-range" min="0" max="5" step="1" value="0" class="flex-1 accent-white">
   </div>
 
-  <div class="relative mb-1" id="trim-track">
-    <div class="ns-slider" id="trim-slider"></div>
+  <div id="filmstrip-scroll" class="overflow-x-auto border border-white/30 mb-2">
+    <div id="filmstrip-inner" class="relative">
+      <img id="filmstrip-img" src="{{ url_for('serve_thumbnails') }}" alt=""
+           class="block h-14 max-w-none select-none pointer-events-none" draggable="false"
+           onerror="this.style.display='none'">
+      <div id="trim-slider"></div>
+    </div>
   </div>
 
   <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-white/60 mb-2">
@@ -92,26 +84,23 @@
 <script>
 (function () {
   var MAX_CLIP = 15;
-  var ZOOM_SPAN = 45;
+  var ZOOM_LEVELS = [1, 2, 4, 8, 16, 32];
 
   var video = document.getElementById('video');
-  var overviewEl = document.getElementById('overview-slider');
-  var overviewWrap = document.getElementById('overview-wrap');
-  var overviewHighlight = document.getElementById('overview-highlight');
-  var zoomLabel = document.getElementById('zoom-range-label');
+  var zoomRange = document.getElementById('zoom-range');
+  var scrollEl = document.getElementById('filmstrip-scroll');
+  var innerEl = document.getElementById('filmstrip-inner');
+  var imgEl = document.getElementById('filmstrip-img');
   var trimEl = document.getElementById('trim-slider');
   var startInput = document.getElementById('start-input');
   var endInput = document.getElementById('end-input');
   var readout = document.getElementById('trim-readout');
   var loopTimer = document.getElementById('loop-timer');
 
-  var overviewSlider = null;
   var trimSlider = null;
   var looping = false;
   var videoDuration = 0;
-  var overviewPosition = 0;
-  var zoomStart = 0;
-  var zoomEnd = 0;
+  var basePxPerSec = 1;
 
   function fmt(n) { return Number(n).toFixed(1); }
 
@@ -134,49 +123,33 @@
     loopTimer.classList.add('hidden');
   }
 
-  function computeZoomWindow(center) {
-    if (videoDuration <= ZOOM_SPAN) return [0, videoDuration];
-    var half = ZOOM_SPAN / 2;
-    var s = Math.min(Math.max(center - half, 0), videoDuration - ZOOM_SPAN);
-    return [s, s + ZOOM_SPAN];
+  // Zoom is pure CSS: the timeline's own range is always [0, videoDuration]
+  // and never changes, so noUiSlider positions handles by percentage of the
+  // filmstrip's width — widening that width via CSS is the entire zoom
+  // implementation, with no manual clamping or range math required.
+  function resizeFilmstrip() {
+    var multiplier = ZOOM_LEVELS[parseInt(zoomRange.value, 10)] || 1;
+    var px = basePxPerSec * multiplier;
+    var width = Math.max(scrollEl.clientWidth, videoDuration * px);
+
+    var midTime = (parseFloat(startInput.value) + parseFloat(endInput.value)) / 2;
+    if (isNaN(midTime)) midTime = 0;
+
+    innerEl.style.width = width + 'px';
+    imgEl.style.width = width + 'px';
+    if (trimSlider) trimSlider.set(trimSlider.get());
+
+    var midPx = midTime * (width / videoDuration);
+    scrollEl.scrollLeft = midPx - scrollEl.clientWidth / 2;
   }
 
-  function setZoomWindow(delta) {
-    var w = computeZoomWindow(overviewPosition);
-    zoomStart = w[0];
-    zoomEnd = w[1];
-    zoomLabel.textContent = fmtHMS(zoomStart) + '–' + fmtHMS(zoomEnd);
-
-    if (videoDuration > 0) {
-      overviewHighlight.style.left = (zoomStart / videoDuration * 100) + '%';
-      overviewHighlight.style.width = ((zoomEnd - zoomStart) / videoDuration * 100) + '%';
-    }
-
-    if (trimSlider) {
-      trimSlider.updateOptions({ range: { min: zoomStart, max: zoomEnd } }, false);
-      var curStart = parseFloat(startInput.value) || zoomStart;
-      var curEnd = parseFloat(endInput.value) || curStart + 5;
-      var len = curEnd - curStart;
-      // shift the clip by the same amount the overview handle just moved,
-      // so it pans together with the window instead of snapping to an edge
-      var ns = curStart + delta;
-      ns = Math.min(Math.max(ns, zoomStart), zoomEnd - 0.1);
-      var ne = Math.min(ns + len, zoomEnd);
-      trimSlider.set([ns, ne]);
-    }
-  }
-
-  function buildTrim() {
+  function buildTrim(duration) {
     if (trimSlider) return;
-    var w = computeZoomWindow(0);
-    zoomStart = w[0];
-    zoomEnd = w[1];
-    var initEnd = Math.min(zoomStart + 5, zoomEnd);
 
     trimSlider = noUiSlider.create(trimEl, {
-      start: [zoomStart, initEnd],
-      connect: true,
-      range: { min: zoomStart, max: zoomEnd },
+      start: [0, Math.min(5, duration)],
+      connect: [true, true, true],
+      range: { min: 0, max: duration },
       step: 0.1,
       margin: 0.1,
       limit: MAX_CLIP,
@@ -200,39 +173,16 @@
     });
   }
 
-  function buildOverview(duration) {
-    if (overviewSlider) return;
-    overviewSlider = noUiSlider.create(overviewEl, {
-      start: [0],
-      range: { min: 0, max: duration },
-      step: 0.1,
-      tooltips: [{ to: function (v) { return fmtHMS(v); } }],
-      behaviour: 'drag-tap'
-    });
-
-    overviewSlider.on('update', function (values) {
-      var newPosition = parseFloat(values[0]);
-      var delta = newPosition - overviewPosition;
-      overviewPosition = newPosition;
-      setZoomWindow(delta);
-    });
-
-    overviewSlider.on('slide', function (values) {
-      video.currentTime = parseFloat(values[0]);
-    });
-  }
-
   function buildAll(duration) {
     if (videoDuration || !isFinite(duration) || duration <= 0) return;
     videoDuration = duration;
-    buildTrim();
-    buildOverview(duration);
+    basePxPerSec = Math.max(0.02, scrollEl.clientWidth / duration);
+    buildTrim(duration);
     // noUiSlider fires its initial 'update' event during create(), before our
-    // listeners are attached — force one explicit sync so hidden inputs and
-    // labels reflect the real starting state without requiring user input.
+    // listener is attached — force one explicit sync so hidden inputs and
+    // the readout reflect the real starting state without requiring input.
     trimSlider.set(trimSlider.get());
-    overviewSlider.set(overviewSlider.get());
-    if (duration <= ZOOM_SPAN) overviewWrap.classList.add('hidden');
+    resizeFilmstrip();
   }
 
   if (video.readyState >= 1 && isFinite(video.duration)) {
@@ -242,15 +192,7 @@
     buildAll(video.duration);
   });
 
-  document.querySelectorAll('.nudge-btn').forEach(function (btn) {
-    btn.addEventListener('click', function () {
-      if (!overviewSlider) return;
-      var delta = parseFloat(btn.dataset.delta);
-      var next = Math.min(Math.max(overviewPosition + delta, 0), videoDuration);
-      overviewSlider.set(next);
-      video.currentTime = next;
-    });
-  });
+  zoomRange.addEventListener('input', resizeFilmstrip);
 
   video.addEventListener('click', function () {
     if (looping) {
@@ -288,42 +230,67 @@
   .htmx-indicator { display: none; }
   .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
 
-  #overview-highlight { z-index: 1; }
-  .ns-slider {
-    min-height: 6px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
+  #filmstrip-scroll {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
   }
-  .ns-slider.noUi-target {
-    position: relative;
-    z-index: 2;
-    background: transparent;
-    border: 1px solid rgba(255, 255, 255, 0.4);
+  #filmstrip-scroll::-webkit-scrollbar { height: 5px; }
+  #filmstrip-scroll::-webkit-scrollbar-track { background: transparent; }
+  #filmstrip-scroll::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.25);
     border-radius: 0;
-    box-shadow: none;
-    height: 6px;
   }
-  #trim-slider.noUi-target .noUi-connect { background: #fff; }
-  .ns-slider .noUi-handle {
+  #filmstrip-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.45); }
+  #filmstrip-inner { height: 3.5rem; }
+  #filmstrip-img { image-rendering: auto; -webkit-user-drag: none; }
+
+  #trim-slider.noUi-target {
+    position: absolute;
+    inset: 0;
+    /* overrides noUiSlider's own .noUi-horizontal{height:18px} rule, which
+       would otherwise win the over-constrained top/height/bottom box math */
+    height: 100%;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+  }
+  #trim-slider .noUi-connects { border-radius: 0; }
+  /* shade the parts of the filmstrip outside the selected clip */
+  #trim-slider .noUi-connect:nth-child(1),
+  #trim-slider .noUi-connect:nth-child(3) {
+    background: rgba(0, 0, 0, 0.7);
+  }
+  #trim-slider .noUi-connect:nth-child(2) {
+    background: transparent;
+    border-left: 1px solid #fff;
+    border-right: 1px solid #fff;
+  }
+  #trim-slider .noUi-handle {
     background: #fff;
     border: 1px solid #fff;
     border-radius: 0;
     box-shadow: none;
-    width: 14px;
-    height: 20px;
-    top: -7px;
-    right: -7px;
+    width: 10px;
+    /* noUiSlider's own .noUi-origin wrapper is hardcoded to height:0, so a
+       percentage height here would resolve against that and collapse to 0 */
+    height: 3.5rem;
+    top: 0;
+    right: -5px;
     cursor: grab;
   }
-  .ns-slider .noUi-handle:before,
-  .ns-slider .noUi-handle:after { display: none; }
-  .ns-slider .noUi-handle:active { cursor: grabbing; }
-  .ns-slider .noUi-tooltip {
+  #trim-slider .noUi-handle:before,
+  #trim-slider .noUi-handle:after { display: none; }
+  #trim-slider .noUi-handle:active { cursor: grabbing; }
+  #trim-slider .noUi-tooltip {
     background: #000;
     color: #fff;
     border: 1px solid rgba(255, 255, 255, 0.4);
     border-radius: 0;
     font-size: 11px;
     padding: 1px 4px;
+    top: -22px;
   }
 </style>
 {% endblock %}
