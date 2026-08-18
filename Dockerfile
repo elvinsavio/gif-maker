@@ -20,4 +20,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 5000
 
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "--timeout", "180", "app:app"]
+CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "--worker-class", "gthread", "--threads", "4", "--timeout", "600", "app:app"]

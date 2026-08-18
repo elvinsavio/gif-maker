@@ -255,6 +255,10 @@
     border: none;
     box-shadow: none;
     border-radius: 0;
+    /* let a horizontal swipe over the slider scroll the filmstrip natively
+       instead of being captured as a drag-tap gesture; handles opt back
+       into JS-driven dragging below */
+    touch-action: pan-x;
   }
   #trim-slider .noUi-connects { border-radius: 0; }
   /* shade the parts of the filmstrip outside the selected clip */
@@ -279,6 +283,7 @@
     top: 0;
     right: -5px;
     cursor: grab;
+    touch-action: none;
   }
   #trim-slider .noUi-handle:before,
   #trim-slider .noUi-handle:after { display: none; }

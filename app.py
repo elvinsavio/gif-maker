@@ -34,7 +34,7 @@ if not (SECRET_KEY and APP_USERNAME and APP_PASSWORD):
         "SECRET_KEY, APP_USERNAME and APP_PASSWORD must be set (see .env.example)"
     )
 
-MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "1024"))
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "4096"))
 ALLOWED_VIDEO_EXT = {"mp4", "mov", "mkv", "webm", "avi", "m4v"}
 
 app = Flask(__name__)
