@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}gif maker{% endblock %}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/nouislider@15.7.1/dist/nouislider.min.js"></script>
+</head>
+<body class="bg-black text-white font-mono min-h-screen">
+  <div class="max-w-3xl mx-auto px-4 py-8">
+    <header class="flex items-baseline justify-between border-b border-white/30 pb-3 mb-6">
+      <a href="{{ url_for('index') }}" class="text-lg tracking-widest">GIF MAKER</a>
+      {% if session.get('logged_in') %}
+        <div class="flex items-center gap-4 text-sm">
+          {% if nav_has_video %}
+            <form method="post" action="{{ url_for('clear_all') }}"
+                  hx-post="{{ url_for('clear_all') }}"
+                  hx-confirm="Delete the current video? This cannot be undone.">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+              <button type="submit" class="text-white/60 hover:text-white">clear all</button>
+            </form>
+          {% endif %}
+          <a href="{{ url_for('logout') }}" class="text-white/60 hover:text-white">log out</a>
+        </div>
+      {% endif %}
+    </header>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="border border-white/30 px-3 py-2 mb-6 text-sm"
+             x-data="{ show: true }" x-show="show" x-init="setTimeout(() => show = false, 5000)">
+          {% for m in messages %}
+            <div>! {{ m }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

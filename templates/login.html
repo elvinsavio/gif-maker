@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}log in — gif maker{% endblock %}
+{% block content %}
+<div class="max-w-xs mx-auto mt-12">
+  <form method="post" class="space-y-4">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label class="block text-sm text-white/60 mb-1" for="username">user id</label>
+      <input class="w-full bg-black border border-white/40 px-3 py-2 focus:outline-none focus:border-white"
+             type="text" id="username" name="username" autofocus required>
+    </div>
+    <div>
+      <label class="block text-sm text-white/60 mb-1" for="password">password</label>
+      <input class="w-full bg-black border border-white/40 px-3 py-2 focus:outline-none focus:border-white"
+             type="password" id="password" name="password" required>
+    </div>
+    <button class="w-full border border-white px-3 py-2 hover:bg-white hover:text-black transition" type="submit">
+      log in
+    </button>
+  </form>
+</div>
+{% endblock %}

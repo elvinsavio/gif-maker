@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+{% block title %}gif maker{% endblock %}
+{% block content %}
+
+{% if not ffmpeg_ok %}
+<div class="border border-white/30 px-3 py-2 mb-6 text-sm text-white/70">
+  ffmpeg / ffprobe not found on this server. Install ffmpeg for gif generation to work.
+</div>
+{% endif %}
+
+<section class="mb-6">
+  <h2 class="text-sm text-white/60 mb-2">video</h2>
+  <form method="post" action="{{ url_for('upload') }}" enctype="multipart/form-data" class="flex items-center gap-3">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input class="flex-1 text-sm border border-white/40 file:mr-3 file:py-1 file:px-2 file:bg-transparent file:border file:border-white/40 file:text-white file:hover:bg-white file:hover:text-black"
+           type="file" name="video" accept="video/*" required>
+    <button class="border border-white px-3 py-2 text-sm hover:bg-white hover:text-black transition" type="submit">
+      {{ has_video and "replace" or "upload" }}
+    </button>
+  </form>
+  {% if has_video %}
+    <p class="text-xs text-white/50 mt-1">uploading a new video deletes the current one.</p>
+  {% endif %}
+</section>
+
+{% if has_video %}
+<section class="mb-6">
+  <h2 class="text-sm text-white/60 mb-1.5">
+    clip <span class="text-white/40">(max 15s)</span>{% if duration %} <span class="text-white/30">&middot; {{ duration|hms }}</span>{% endif %}
+  </h2>
+
+  <form
+    id="gif-form"
+    hx-post="{{ url_for('generate') }}"
+    hx-target="#result"
+    hx-swap="afterbegin"
+    hx-indicator="#generating"
+    class="flex flex-wrap items-end gap-2 mb-2">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <input type="hidden" name="start" id="start-input" value="0">
+    <input type="hidden" name="end" id="end-input" value="0">
+
+    <div>
+      <label class="block text-[10px] text-white/50 mb-0.5">fps</label>
+      <input type="number" name="fps" value="15" min="1" max="30"
+             class="w-14 bg-black border border-white/40 px-1.5 py-1 text-sm focus:outline-none focus:border-white">
+    </div>
+    <div>
+      <label class="block text-[10px] text-white/50 mb-0.5">width</label>
+      <input type="number" name="width" value="480" min="120" max="1280"
+             class="w-20 bg-black border border-white/40 px-1.5 py-1 text-sm focus:outline-none focus:border-white">
+    </div>
+
+    <button class="border border-white px-3 py-1.5 text-sm hover:bg-white hover:text-black transition" type="submit">
+      make gif
+    </button>
+    <span id="generating" class="htmx-indicator text-xs text-white/50">generating…</span>
+  </form>
+
+  <video id="video" class="w-full border-2 border-white/30 mb-2 cursor-pointer" src="{{ url_for('serve_video') }}" muted playsinline preload="metadata"></video>
+
+  <div id="overview-wrap" class="mb-2">
+    <div class="flex items-center gap-2">
+      <div class="flex items-center gap-1 shrink-0 text-xs">
+        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="-30">-30</button>
+        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="-5">-5</button>
+      </div>
+      <div class="relative flex-1" id="overview-track">
+        <div id="overview-highlight" class="absolute top-0 h-full bg-white/25 pointer-events-none"></div>
+        <div class="ns-slider" id="overview-slider"></div>
+      </div>
+      <div class="flex items-center gap-1 shrink-0 text-xs">
+        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="5">+5</button>
+        <button type="button" class="nudge-btn border border-white/40 px-1.5 py-0.5 hover:bg-white hover:text-black transition" data-delta="30">+30</button>
+      </div>
+    </div>
+    <div class="text-xs text-white/50 mt-1">zoomed to <span id="zoom-range-label">00.0&ndash;00.0</span></div>
+  </div>
+
+  <div class="relative mb-1" id="trim-track">
+    <div class="ns-slider" id="trim-slider"></div>
+  </div>
+
+  <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-white/60 mb-2">
+    <span id="trim-readout">00.0 &rarr; 00.0 (0.0s)</span>
+    <span id="loop-timer" class="tabular-nums hidden">0.0s / 0.0s</span>
+  </div>
+
+  <div id="result" class="mt-3 space-y-3"></div>
+</section>
+
+<script>
+(function () {
+  var MAX_CLIP = 15;
+  var ZOOM_SPAN = 45;
+
+  var video = document.getElementById('video');
+  var overviewEl = document.getElementById('overview-slider');
+  var overviewWrap = document.getElementById('overview-wrap');
+  var overviewHighlight = document.getElementById('overview-highlight');
+  var zoomLabel = document.getElementById('zoom-range-label');
+  var trimEl = document.getElementById('trim-slider');
+  var startInput = document.getElementById('start-input');
+  var endInput = document.getElementById('end-input');
+  var readout = document.getElementById('trim-readout');
+  var loopTimer = document.getElementById('loop-timer');
+
+  var overviewSlider = null;
+  var trimSlider = null;
+  var looping = false;
+  var videoDuration = 0;
+  var overviewPosition = 0;
+  var zoomStart = 0;
+  var zoomEnd = 0;
+
+  function fmt(n) { return Number(n).toFixed(1); }
+
+  function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function fmtHMS(totalSeconds) {
+    totalSeconds = Math.max(0, totalSeconds);
+    var h = Math.floor(totalSeconds / 3600);
+    var m = Math.floor((totalSeconds % 3600) / 60);
+    var s = totalSeconds - h * 3600 - m * 60;
+    var sStr = s < 10 ? '0' + s.toFixed(1) : s.toFixed(1);
+    if (h > 0) return h + ':' + pad2(m) + ':' + sStr;
+    return pad2(m) + ':' + sStr;
+  }
+
+  function stopLoop() {
+    looping = false;
+    video.classList.remove('border-white');
+    video.classList.add('border-white/30');
+    loopTimer.classList.add('hidden');
+  }
+
+  function computeZoomWindow(center) {
+    if (videoDuration <= ZOOM_SPAN) return [0, videoDuration];
+    var half = ZOOM_SPAN / 2;
+    var s = Math.min(Math.max(center - half, 0), videoDuration - ZOOM_SPAN);
+    return [s, s + ZOOM_SPAN];
+  }
+
+  function setZoomWindow(delta) {
+    var w = computeZoomWindow(overviewPosition);
+    zoomStart = w[0];
+    zoomEnd = w[1];
+    zoomLabel.textContent = fmtHMS(zoomStart) + '–' + fmtHMS(zoomEnd);
+
+    if (videoDuration > 0) {
+      overviewHighlight.style.left = (zoomStart / videoDuration * 100) + '%';
+      overviewHighlight.style.width = ((zoomEnd - zoomStart) / videoDuration * 100) + '%';
+    }
+
+    if (trimSlider) {
+      trimSlider.updateOptions({ range: { min: zoomStart, max: zoomEnd } }, false);
+      var curStart = parseFloat(startInput.value) || zoomStart;
+      var curEnd = parseFloat(endInput.value) || curStart + 5;
+      var len = curEnd - curStart;
+      // shift the clip by the same amount the overview handle just moved,
+      // so it pans together with the window instead of snapping to an edge
+      var ns = curStart + delta;
+      ns = Math.min(Math.max(ns, zoomStart), zoomEnd - 0.1);
+      var ne = Math.min(ns + len, zoomEnd);
+      trimSlider.set([ns, ne]);
+    }
+  }
+
+  function buildTrim() {
+    if (trimSlider) return;
+    var w = computeZoomWindow(0);
+    zoomStart = w[0];
+    zoomEnd = w[1];
+    var initEnd = Math.min(zoomStart + 5, zoomEnd);
+
+    trimSlider = noUiSlider.create(trimEl, {
+      start: [zoomStart, initEnd],
+      connect: true,
+      range: { min: zoomStart, max: zoomEnd },
+      step: 0.1,
+      margin: 0.1,
+      limit: MAX_CLIP,
+      tooltips: [
+        { to: function (v) { return fmtHMS(v); } },
+        { to: function (v) { return fmtHMS(v); } }
+      ],
+      behaviour: 'drag-tap'
+    });
+
+    trimSlider.on('update', function (values) {
+      var s = parseFloat(values[0]);
+      var e = parseFloat(values[1]);
+      startInput.value = s;
+      endInput.value = e;
+      readout.textContent = fmtHMS(s) + ' → ' + fmtHMS(e) + ' (' + fmt(e - s) + 's)';
+    });
+
+    trimSlider.on('slide', function (values, handle) {
+      video.currentTime = parseFloat(values[handle]);
+    });
+  }
+
+  function buildOverview(duration) {
+    if (overviewSlider) return;
+    overviewSlider = noUiSlider.create(overviewEl, {
+      start: [0],
+      range: { min: 0, max: duration },
+      step: 0.1,
+      tooltips: [{ to: function (v) { return fmtHMS(v); } }],
+      behaviour: 'drag-tap'
+    });
+
+    overviewSlider.on('update', function (values) {
+      var newPosition = parseFloat(values[0]);
+      var delta = newPosition - overviewPosition;
+      overviewPosition = newPosition;
+      setZoomWindow(delta);
+    });
+
+    overviewSlider.on('slide', function (values) {
+      video.currentTime = parseFloat(values[0]);
+    });
+  }
+
+  function buildAll(duration) {
+    if (videoDuration || !isFinite(duration) || duration <= 0) return;
+    videoDuration = duration;
+    buildTrim();
+    buildOverview(duration);
+    // noUiSlider fires its initial 'update' event during create(), before our
+    // listeners are attached — force one explicit sync so hidden inputs and
+    // labels reflect the real starting state without requiring user input.
+    trimSlider.set(trimSlider.get());
+    overviewSlider.set(overviewSlider.get());
+    if (duration <= ZOOM_SPAN) overviewWrap.classList.add('hidden');
+  }
+
+  if (video.readyState >= 1 && isFinite(video.duration)) {
+    buildAll(video.duration);
+  }
+  video.addEventListener('loadedmetadata', function () {
+    buildAll(video.duration);
+  });
+
+  document.querySelectorAll('.nudge-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (!overviewSlider) return;
+      var delta = parseFloat(btn.dataset.delta);
+      var next = Math.min(Math.max(overviewPosition + delta, 0), videoDuration);
+      overviewSlider.set(next);
+      video.currentTime = next;
+    });
+  });
+
+  video.addEventListener('click', function () {
+    if (looping) {
+      stopLoop();
+      video.pause();
+      return;
+    }
+    looping = true;
+    video.classList.remove('border-white/30');
+    video.classList.add('border-white');
+    loopTimer.classList.remove('hidden');
+    video.currentTime = parseFloat(startInput.value);
+    video.play();
+  });
+
+  video.addEventListener('timeupdate', function () {
+    if (!looping) return;
+    var start = parseFloat(startInput.value);
+    var end = parseFloat(endInput.value);
+    if (video.currentTime >= end) {
+      video.currentTime = start;
+      video.play();
+    }
+    var elapsed = Math.max(0, video.currentTime - start);
+    loopTimer.textContent = fmt(elapsed) + 's / ' + fmt(end - start) + 's';
+  });
+  video.addEventListener('pause', function () {
+    if (looping) stopLoop();
+  });
+})();
+</script>
+{% endif %}
+
+<style>
+  .htmx-indicator { display: none; }
+  .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
+
+  #overview-highlight { z-index: 1; }
+  .ns-slider {
+    min-height: 6px;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }
+  .ns-slider.noUi-target {
+    position: relative;
+    z-index: 2;
+    background: transparent;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 0;
+    box-shadow: none;
+    height: 6px;
+  }
+  #trim-slider.noUi-target .noUi-connect { background: #fff; }
+  .ns-slider .noUi-handle {
+    background: #fff;
+    border: 1px solid #fff;
+    border-radius: 0;
+    box-shadow: none;
+    width: 14px;
+    height: 20px;
+    top: -7px;
+    right: -7px;
+    cursor: grab;
+  }
+  .ns-slider .noUi-handle:before,
+  .ns-slider .noUi-handle:after { display: none; }
+  .ns-slider .noUi-handle:active { cursor: grabbing; }
+  .ns-slider .noUi-tooltip {
+    background: #000;
+    color: #fff;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    border-radius: 0;
+    font-size: 11px;
+    padding: 1px 4px;
+  }
+</style>
+{% endblock %}
