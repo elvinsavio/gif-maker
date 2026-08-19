@@ -185,6 +185,15 @@ def add_clip(entry):
         tmp.replace(path)
 
 
+def remove_clip(filename):
+    path = clips_list_path()
+    tmp = path.with_suffix(".json.tmp")
+    with CLIPS_LIST_LOCK:
+        clips = [c for c in read_clips_list() if c.get("filename") != filename]
+        tmp.write_text(json.dumps(clips))
+        tmp.replace(path)
+
+
 def clear_clips():
     shutil.rmtree(CLIPS_DIR, ignore_errors=True)
     CLIPS_DIR.mkdir(parents=True, exist_ok=True)
@@ -430,6 +439,7 @@ def generate():
         "partials/result.html",
         gif_data=base64.b64encode(data).decode("ascii"),
         filename=download_name,
+        disk_filename=disk_filename,
         size_mb=size_mb,
     )
 
@@ -496,7 +506,7 @@ def chomp_stream():
         return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
     def generate():
-        yield sse("total", {"total": len(segments)})
+        yield sse("total", {"total": len(segments), "batch_id": batch_id})
         if not segments:
             yield sse("error", {"message": "Video too short to chomp."})
             return
@@ -525,7 +535,7 @@ def chomp_stream():
                     "batch_id": batch_id, "total": len(segments),
                     "clips": done_clips, "status": "running", "message": None,
                 })
-                event_clip = dict(clip, done=done, total=len(segments))
+                event_clip = dict(clip, done=done, total=len(segments), batch_id=batch_id)
                 event_clip["url"] = url_for("serve_chomp_clip", batch_id=batch_id, filename=clip["filename"])
                 yield sse("clip", event_clip)
 
@@ -559,11 +569,16 @@ def chomp_status():
 
     clips = []
     for clip in state["clips"]:
-        c = dict(clip)
+        c = dict(clip, batch_id=state["batch_id"])
         c["url"] = url_for("serve_chomp_clip", batch_id=state["batch_id"], filename=clip["filename"])
         clips.append(c)
 
-    resp = {"status": state["status"], "total": state["total"], "clips": clips}
+    resp = {
+        "status": state["status"],
+        "total": state["total"],
+        "clips": clips,
+        "batch_id": state["batch_id"],
+    }
     if state["status"] == "done":
         resp["download_all"] = url_for("download_chomp_all", batch_id=state["batch_id"])
     if state.get("message"):
@@ -587,6 +602,25 @@ def clip_list():
     for c in clips:
         c["url"] = url_for("serve_clip", filename=c["filename"])
     return {"clips": clips}
+
+
+@app.route("/clip/<filename>/delete", methods=["POST"])
+@login_required
+def delete_clip(filename):
+    check_csrf()
+    filename = secure_filename(filename)
+    if filename:
+        (CLIPS_DIR / filename).unlink(missing_ok=True)
+        remove_clip(filename)
+    return ("", 204)
+
+
+@app.route("/clips/clear", methods=["POST"])
+@login_required
+def clear_clips_route():
+    check_csrf()
+    clear_clips()
+    return ("", 204)
 
 
 @app.route("/chomp/<batch_id>/<filename>")
@@ -618,6 +652,33 @@ def download_chomp_all(batch_id):
         as_attachment=True,
         download_name=f"chomp_{batch_id}.zip",
     )
+
+
+@app.route("/chomp/<batch_id>/<filename>/delete", methods=["POST"])
+@login_required
+def delete_chomp_clip(batch_id, filename):
+    check_csrf()
+    batch_dir = chomp_batch_dir(batch_id)
+    filename = secure_filename(filename)
+    if filename:
+        (batch_dir / filename).unlink(missing_ok=True)
+        state = read_chomp_state()
+        if state and state.get("batch_id") == batch_id:
+            state["clips"] = [c for c in state["clips"] if c.get("filename") != filename]
+            write_chomp_state(state)
+    return ("", 204)
+
+
+@app.route("/chomp/<batch_id>/clear", methods=["POST"])
+@login_required
+def clear_chomp_batch(batch_id):
+    check_csrf()
+    # only one chomp batch is ever live at a time, so clearing "this" batch
+    # and clearing the whole chomp dir are the same operation
+    state = read_chomp_state()
+    if state and state.get("batch_id") == batch_id:
+        clear_chomps()
+    return ("", 204)
 
 
 if __name__ == "__main__":

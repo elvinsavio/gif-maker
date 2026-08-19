@@ -68,9 +68,6 @@
     <button type="button" id="pan-left-btn" class="pan-btn">&larr;</button>
     <div id="filmstrip-scroll" class="flex-1 border border-white/30 min-w-0">
       <div id="filmstrip-inner" class="relative">
-        <img id="filmstrip-img" src="{{ url_for('serve_thumbnails') }}" alt=""
-             class="block h-14 select-none pointer-events-none" draggable="false"
-             onerror="this.style.display='none'">
         <div id="trim-slider"></div>
       </div>
     </div>
@@ -89,19 +86,22 @@
     <span id="loop-timer" class="tabular-nums hidden">0.0s / 0.0s</span>
   </div>
 
-  <div id="result" class="mt-3 space-y-3"></div>
+  <div class="flex items-center justify-between mt-3 mb-1">
+    <h3 class="text-xs text-white/40">clips</h3>
+    <button type="button" id="clear-clips-btn" class="text-xs text-white/50 border border-white/30 px-2 py-1 hover:bg-white hover:text-black transition">
+      clear all
+    </button>
+  </div>
+  <div id="result" class="space-y-3"></div>
 </section>
 
 <script>
 (function () {
   var MAX_CLIP = 15;
-
   var MIN_WINDOW = 3;
   var ZOOM_FACTOR = 2;
 
   var video = document.getElementById('video');
-  var scrollEl = document.getElementById('filmstrip-scroll');
-  var imgEl = document.getElementById('filmstrip-img');
   var trimEl = document.getElementById('trim-slider');
   var zoomInBtn = document.getElementById('zoom-in-btn');
   var zoomOutBtn = document.getElementById('zoom-out-btn');
@@ -143,22 +143,12 @@
     loopTimer.classList.add('hidden');
   }
 
-  // Zoom re-windows the same fixed-size, non-scrolling filmstrip via a CSS
-  // transform instead of widening it inside a scrollable container — there's
-  // no scroll gesture on this element to conflict with a handle drag, unlike
-  // the old zoomed/scrolling filmstrip this replaced. noUiSlider's own range
-  // moves to match the visible window, so handles keep working normally.
+  // Zoom re-windows noUiSlider's own range on the same fixed-size,
+  // non-scrolling track — there's no scroll gesture on this element to
+  // conflict with a handle drag.
   function applyZoomWindow(start, end) {
     windowStart = Math.max(0, start);
     windowEnd = Math.min(videoDuration, end);
-    var windowSize = windowEnd - windowStart;
-    var containerWidth = scrollEl.clientWidth;
-    var scale = videoDuration / windowSize;
-    var fullWidth = containerWidth * scale;
-
-    imgEl.style.width = fullWidth + 'px';
-    imgEl.style.transform = 'translateX(-' + (windowStart / videoDuration * fullWidth) + 'px)';
-
     if (trimSlider) {
       trimSlider.updateOptions({ range: { min: windowStart, max: windowEnd } }, false);
     }
@@ -194,10 +184,7 @@
     if (newStart < 0) { newEnd -= newStart; newStart = 0; }
     if (newEnd > videoDuration) { newStart -= (newEnd - videoDuration); newEnd = videoDuration; }
     newStart = Math.max(0, newStart);
-
     var delta = newStart - s;
-    trimSlider.set([newStart, newEnd]);
-    video.currentTime = newStart;
 
     // shift the window by the same delta, clamped as a rigid translation
     // (not clamping each edge independently) so panning at either end of
@@ -206,7 +193,16 @@
     var newWinEnd = windowEnd + delta;
     if (newWinStart < 0) { newWinEnd -= newWinStart; newWinStart = 0; }
     if (newWinEnd > videoDuration) { newWinStart -= (newWinEnd - videoDuration); newWinEnd = videoDuration; }
-    applyZoomWindow(Math.max(0, newWinStart), newWinEnd);
+    newWinStart = Math.max(0, newWinStart);
+
+    // the window's range must be widened to fit the new selection *before*
+    // writing the new values — otherwise noUiSlider clamps the incoming
+    // values against the still-old (narrower) range, which can push both
+    // handles onto the same edge and collapse the selection to the 0.1s
+    // margin instead of actually moving it
+    applyZoomWindow(newWinStart, newWinEnd);
+    trimSlider.set([newStart, newEnd]);
+    video.currentTime = newStart;
   }
 
   function zoomBy(factor) {
@@ -315,35 +311,61 @@
     });
   }
 
+  function postForm(url) {
+    var csrfToken = gifForm.querySelector('[name="csrf_token"]').value;
+    return fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'csrf_token=' + encodeURIComponent(csrfToken),
+    });
+  }
+
   function createChompCard() {
     var card = document.createElement('div');
     card.className = 'border border-white/30 p-3';
     card.innerHTML =
       '<div class="flex items-center justify-between text-xs text-white/60 mb-2">' +
         '<span class="chomp-status">chomping&hellip; 0/?</span>' +
-        '<a class="chomp-download-all hidden border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition" href="#">download all</a>' +
+        '<div class="flex items-center gap-1">' +
+          '<a class="chomp-download-all hidden border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition" href="#">download all</a>' +
+          '<button type="button" class="chomp-clear-all border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition">clear all</button>' +
+        '</div>' +
       '</div>' +
       '<div class="h-1 bg-white/10 mb-2"><div class="chomp-progress h-full bg-white/70" style="width:0%"></div></div>' +
       '<div class="chomp-grid grid grid-cols-2 sm:grid-cols-3 gap-2"></div>';
     resultEl.insertBefore(card, resultEl.firstChild);
-    return {
+    var ui = {
       card: card,
       statusEl: card.querySelector('.chomp-status'),
       progressEl: card.querySelector('.chomp-progress'),
       downloadAllEl: card.querySelector('.chomp-download-all'),
+      clearAllEl: card.querySelector('.chomp-clear-all'),
       gridEl: card.querySelector('.chomp-grid'),
+      batchId: null,
     };
+    ui.clearAllEl.addEventListener('click', function () {
+      if (!ui.batchId) return;
+      postForm('/chomp/' + ui.batchId + '/clear').then(function () {
+        ui.card.remove();
+      });
+    });
+    return ui;
   }
 
   function renderChompClip(gridEl, clip) {
     var item = document.createElement('div');
     item.className = 'border border-white/10';
+    item.dataset.filename = clip.filename;
+    item.dataset.batchId = clip.batch_id || '';
     item.innerHTML =
       '<img src="' + escapeHtml(clip.url) + '" alt="" class="w-full block">' +
       '<div class="flex items-center justify-between text-[10px] text-white/50 px-1 py-1">' +
         '<span>' + escapeHtml(clip.label) + ' &middot; ' + clip.size_mb + ' mb</span>' +
-        '<a class="border border-white/30 px-1 hover:bg-white hover:text-black transition" ' +
-           'href="' + escapeHtml(clip.url) + '" download="' + escapeHtml(clip.filename) + '">download</a>' +
+        '<div class="flex items-center gap-1">' +
+          '<a class="border border-white/30 px-1 hover:bg-white hover:text-black transition" ' +
+             'href="' + escapeHtml(clip.url) + '" download="' + escapeHtml(clip.filename) + '">download</a>' +
+          '<button type="button" class="delete-chomp-btn border border-white/30 px-1 hover:bg-white hover:text-black transition">delete</button>' +
+        '</div>' +
       '</div>';
     gridEl.appendChild(item);
   }
@@ -374,6 +396,7 @@
 
     source.addEventListener('total', function (e) {
       var data = JSON.parse(e.data);
+      ui.batchId = data.batch_id;
       if (!data.total) {
         ui.statusEl.textContent = 'chomp: nothing to do';
         source.close();
@@ -416,6 +439,7 @@
     fetch('{{ url_for("chomp_status") }}')
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        ui.batchId = data.batch_id;
         for (; renderedCount < data.clips.length; renderedCount++) {
           renderChompClip(ui.gridEl, data.clips[renderedCount]);
         }
@@ -445,6 +469,7 @@
 
         chompBtn.disabled = true;
         var ui = createChompCard();
+        ui.batchId = data.batch_id;
         data.clips.forEach(function (clip) { renderChompClip(ui.gridEl, clip); });
         setChompProgress(ui, data.clips.length, data.total);
 
@@ -463,13 +488,17 @@
 
   function renderPersistedClip(clip) {
     var card = document.createElement('div');
-    card.className = 'border border-white/30 p-3';
+    card.className = 'clip-card border border-white/30 p-3';
+    card.dataset.filename = clip.filename;
     card.innerHTML =
       '<img src="' + escapeHtml(clip.url) + '" alt="generated clip" class="w-full border border-white/10 mb-2">' +
       '<div class="flex items-center justify-between text-xs text-white/60">' +
         '<span>' + clip.size_mb + ' mb</span>' +
-        '<a class="border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition" ' +
-           'href="' + escapeHtml(clip.url) + '" download="' + escapeHtml(clip.download_name) + '">download</a>' +
+        '<div class="flex items-center gap-1">' +
+          '<a class="border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition" ' +
+             'href="' + escapeHtml(clip.url) + '" download="' + escapeHtml(clip.download_name) + '">download</a>' +
+          '<button type="button" class="delete-clip-btn border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition">delete</button>' +
+        '</div>' +
       '</div>';
     resultEl.appendChild(card);
   }
@@ -483,6 +512,33 @@
       .catch(function () {});
   }
 
+  // event delegation so this works for both server-rendered cards (the
+  // htmx-swapped result of /generate) and the client-rendered ones below,
+  // without needing to rebind listeners each time a card is added
+  resultEl.addEventListener('click', function (e) {
+    var clipDelBtn = e.target.closest('.delete-clip-btn');
+    if (clipDelBtn) {
+      var clipCard = clipDelBtn.closest('.clip-card');
+      postForm('/clip/' + encodeURIComponent(clipCard.dataset.filename) + '/delete')
+        .then(function () { clipCard.remove(); });
+      return;
+    }
+
+    var chompDelBtn = e.target.closest('.delete-chomp-btn');
+    if (chompDelBtn) {
+      var item = chompDelBtn.closest('[data-batch-id]');
+      if (!item.dataset.batchId) return;
+      postForm('/chomp/' + item.dataset.batchId + '/' + encodeURIComponent(item.dataset.filename) + '/delete')
+        .then(function () { item.remove(); });
+    }
+  });
+
+  document.getElementById('clear-clips-btn').addEventListener('click', function () {
+    postForm('{{ url_for("clear_clips_route") }}').then(function () {
+      document.querySelectorAll('.clip-card').forEach(function (el) { el.remove(); });
+    });
+  });
+
   chompBtn.addEventListener('click', startChomp);
   restorePersistedClips();
   resumeChompIfPresent();
@@ -494,8 +550,7 @@
   .htmx-indicator { display: none; }
   .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
 
-  #filmstrip-inner { height: 3.5rem; overflow: hidden; }
-  #filmstrip-img { image-rendering: auto; -webkit-user-drag: none; max-width: none; }
+  #filmstrip-inner { height: 1.5rem; background: rgba(255, 255, 255, 0.05); }
 
   .zoom-btn {
     min-width: 2rem;
