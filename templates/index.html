@@ -232,16 +232,16 @@
 
   #filmstrip-scroll {
     -webkit-overflow-scrolling: touch;
-    scrollbar-width: thin;
-    scrollbar-color: rgba(255, 255, 255, 0.25) transparent;
+    scrollbar-width: auto;
+    scrollbar-color: rgba(255, 255, 255, 0.5) rgba(255, 255, 255, 0.08);
   }
-  #filmstrip-scroll::-webkit-scrollbar { height: 5px; }
-  #filmstrip-scroll::-webkit-scrollbar-track { background: transparent; }
+  #filmstrip-scroll::-webkit-scrollbar { height: 12px; }
+  #filmstrip-scroll::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.08); }
   #filmstrip-scroll::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.5);
     border-radius: 0;
   }
-  #filmstrip-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.45); }
+  #filmstrip-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.7); }
   #filmstrip-inner { height: 3.5rem; }
   #filmstrip-img { image-rendering: auto; -webkit-user-drag: none; }
 
@@ -255,10 +255,11 @@
     border: none;
     box-shadow: none;
     border-radius: 0;
-    /* let a horizontal swipe over the slider scroll the filmstrip natively
-       instead of being captured as a drag-tap gesture; handles opt back
-       into JS-driven dragging below */
-    touch-action: pan-x;
+    /* the slider spans the whole filmstrip, but a touch anywhere on it
+       (background or connects) should fall through to the native scroll
+       of #filmstrip-scroll rather than be caught as a drag-tap gesture;
+       only the handles opt back in to receive touches, below */
+    pointer-events: none;
   }
   #trim-slider .noUi-connects { border-radius: 0; }
   /* shade the parts of the filmstrip outside the selected clip */
@@ -270,7 +271,27 @@
     background: transparent;
     border-left: 1px solid #fff;
     border-right: 1px solid #fff;
+    position: relative;
   }
+  /* dedicated grip to drag the whole clip on touch: the connect itself has
+     pointer-events: none (inherited) so swipes elsewhere scroll the
+     filmstrip, but this pseudo-element is hit-tested as part of the connect,
+     so touching it still reaches noUiSlider's own drag-the-connect handler */
+  #trim-slider .noUi-connect:nth-child(2)::after {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 28px;
+    height: 20px;
+    transform: translate(-50%, -50%);
+    background: rgba(255, 255, 255, 0.35);
+    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+    pointer-events: auto;
+    touch-action: none;
+    cursor: grab;
+  }
+  #trim-slider .noUi-connect:nth-child(2):active::after { cursor: grabbing; }
   #trim-slider .noUi-handle {
     background: #fff;
     border: 1px solid #fff;
@@ -284,6 +305,7 @@
     right: -5px;
     cursor: grab;
     touch-action: none;
+    pointer-events: auto;
   }
   #trim-slider .noUi-handle:before,
   #trim-slider .noUi-handle:after { display: none; }
