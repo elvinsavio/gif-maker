@@ -64,18 +64,24 @@
 
   <video id="video" class="w-full border-2 border-white/30 mb-2 cursor-pointer" src="{{ url_for('serve_video') }}" muted playsinline preload="metadata"></video>
 
-  <div class="flex items-center gap-2 mb-1 text-xs text-white/50">
-    <span class="shrink-0">zoom</span>
-    <input type="range" id="zoom-range" min="0" max="5" step="1" value="0" class="flex-1 accent-white">
+  <div class="flex items-stretch gap-1 mb-3">
+    <button type="button" id="pan-left-btn" class="pan-btn">&larr;</button>
+    <div id="filmstrip-scroll" class="flex-1 border border-white/30 min-w-0">
+      <div id="filmstrip-inner" class="relative">
+        <img id="filmstrip-img" src="{{ url_for('serve_thumbnails') }}" alt=""
+             class="block h-14 select-none pointer-events-none" draggable="false"
+             onerror="this.style.display='none'">
+        <div id="trim-slider"></div>
+      </div>
+    </div>
+    <button type="button" id="pan-right-btn" class="pan-btn">&rarr;</button>
   </div>
 
-  <div id="filmstrip-scroll" class="overflow-x-auto border border-white/30 mb-2">
-    <div id="filmstrip-inner" class="relative">
-      <img id="filmstrip-img" src="{{ url_for('serve_thumbnails') }}" alt=""
-           class="block h-14 max-w-none select-none pointer-events-none" draggable="false"
-           onerror="this.style.display='none'">
-      <div id="trim-slider"></div>
-    </div>
+  <div class="flex items-center gap-2 mb-3 text-xs text-white/50">
+    <span class="shrink-0">zoom</span>
+    <button type="button" id="zoom-out-btn" class="zoom-btn">&minus;</button>
+    <button type="button" id="zoom-in-btn" class="zoom-btn">+</button>
+    <button type="button" id="zoom-reset-btn" class="zoom-btn ml-auto">reset</button>
   </div>
 
   <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-white/60 mb-2">
@@ -89,14 +95,19 @@
 <script>
 (function () {
   var MAX_CLIP = 15;
-  var ZOOM_LEVELS = [1, 2, 4, 8, 16, 32];
+
+  var MIN_WINDOW = 3;
+  var ZOOM_FACTOR = 2;
 
   var video = document.getElementById('video');
-  var zoomRange = document.getElementById('zoom-range');
   var scrollEl = document.getElementById('filmstrip-scroll');
-  var innerEl = document.getElementById('filmstrip-inner');
   var imgEl = document.getElementById('filmstrip-img');
   var trimEl = document.getElementById('trim-slider');
+  var zoomInBtn = document.getElementById('zoom-in-btn');
+  var zoomOutBtn = document.getElementById('zoom-out-btn');
+  var zoomResetBtn = document.getElementById('zoom-reset-btn');
+  var panLeftBtn = document.getElementById('pan-left-btn');
+  var panRightBtn = document.getElementById('pan-right-btn');
   var startInput = document.getElementById('start-input');
   var endInput = document.getElementById('end-input');
   var readout = document.getElementById('trim-readout');
@@ -108,7 +119,8 @@
   var trimSlider = null;
   var looping = false;
   var videoDuration = 0;
-  var basePxPerSec = 1;
+  var windowStart = 0;
+  var windowEnd = 0;
 
   function fmt(n) { return Number(n).toFixed(1); }
 
@@ -131,25 +143,93 @@
     loopTimer.classList.add('hidden');
   }
 
-  // Zoom is pure CSS: the timeline's own range is always [0, videoDuration]
-  // and never changes, so noUiSlider positions handles by percentage of the
-  // filmstrip's width — widening that width via CSS is the entire zoom
-  // implementation, with no manual clamping or range math required.
-  function resizeFilmstrip() {
-    var multiplier = ZOOM_LEVELS[parseInt(zoomRange.value, 10)] || 1;
-    var px = basePxPerSec * multiplier;
-    var width = Math.max(scrollEl.clientWidth, videoDuration * px);
+  // Zoom re-windows the same fixed-size, non-scrolling filmstrip via a CSS
+  // transform instead of widening it inside a scrollable container — there's
+  // no scroll gesture on this element to conflict with a handle drag, unlike
+  // the old zoomed/scrolling filmstrip this replaced. noUiSlider's own range
+  // moves to match the visible window, so handles keep working normally.
+  function applyZoomWindow(start, end) {
+    windowStart = Math.max(0, start);
+    windowEnd = Math.min(videoDuration, end);
+    var windowSize = windowEnd - windowStart;
+    var containerWidth = scrollEl.clientWidth;
+    var scale = videoDuration / windowSize;
+    var fullWidth = containerWidth * scale;
 
-    var midTime = (parseFloat(startInput.value) + parseFloat(endInput.value)) / 2;
-    if (isNaN(midTime)) midTime = 0;
+    imgEl.style.width = fullWidth + 'px';
+    imgEl.style.transform = 'translateX(-' + (windowStart / videoDuration * fullWidth) + 'px)';
 
-    innerEl.style.width = width + 'px';
-    imgEl.style.width = width + 'px';
-    if (trimSlider) trimSlider.set(trimSlider.get());
-
-    var midPx = midTime * (width / videoDuration);
-    scrollEl.scrollLeft = midPx - scrollEl.clientWidth / 2;
+    if (trimSlider) {
+      trimSlider.updateOptions({ range: { min: windowStart, max: windowEnd } }, false);
+    }
+    refreshZoomButtons();
   }
+
+  function refreshZoomButtons() {
+    var s = parseFloat(startInput.value) || 0;
+    var e = parseFloat(endInput.value) || 0;
+    // never let zoom shrink the window past the current selection — that
+    // would force noUiSlider to clamp (and silently change) the user's
+    // chosen start/end just to keep the handles inside the visible range
+    var minSize = Math.max(MIN_WINDOW, e - s);
+    zoomInBtn.disabled = (windowEnd - windowStart) <= minSize + 0.05;
+    zoomOutBtn.disabled = windowStart <= 0 && windowEnd >= videoDuration;
+    panLeftBtn.disabled = s <= 0;
+    panRightBtn.disabled = e >= videoDuration;
+  }
+
+  // Panning slides the selected clip and the zoomed view together, by a
+  // quarter of the current window each tap — there's no scrollable element
+  // to swipe once zoomed in, so this is the only way to reach a part of the
+  // video outside the current window without zooming back out first.
+  function panBy(direction) {
+    if (!trimSlider) return;
+    var s = parseFloat(startInput.value) || 0;
+    var e = parseFloat(endInput.value) || 0;
+    var windowSize = windowEnd - windowStart;
+    var shift = Math.max(0.5, windowSize * 0.25) * direction;
+
+    var newStart = s + shift;
+    var newEnd = e + shift;
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (newEnd > videoDuration) { newStart -= (newEnd - videoDuration); newEnd = videoDuration; }
+    newStart = Math.max(0, newStart);
+
+    var delta = newStart - s;
+    trimSlider.set([newStart, newEnd]);
+    video.currentTime = newStart;
+
+    // shift the window by the same delta, clamped as a rigid translation
+    // (not clamping each edge independently) so panning at either end of
+    // the video can't shrink the window and look like an unwanted zoom
+    var newWinStart = windowStart + delta;
+    var newWinEnd = windowEnd + delta;
+    if (newWinStart < 0) { newWinEnd -= newWinStart; newWinStart = 0; }
+    if (newWinEnd > videoDuration) { newWinStart -= (newWinEnd - videoDuration); newWinEnd = videoDuration; }
+    applyZoomWindow(Math.max(0, newWinStart), newWinEnd);
+  }
+
+  function zoomBy(factor) {
+    if (!trimSlider) return;
+    var s = parseFloat(startInput.value) || 0;
+    var e = parseFloat(endInput.value) || 0;
+    var center = (s + e) / 2;
+    var minSize = Math.max(MIN_WINDOW, e - s);
+    var currentSize = windowEnd - windowStart;
+    var newSize = Math.min(videoDuration, Math.max(minSize, currentSize / factor));
+
+    var newStart = center - newSize / 2;
+    var newEnd = newStart + newSize;
+    if (newStart < 0) { newEnd -= newStart; newStart = 0; }
+    if (newEnd > videoDuration) { newStart -= (newEnd - videoDuration); newEnd = videoDuration; }
+    applyZoomWindow(Math.max(0, newStart), newEnd);
+  }
+
+  zoomInBtn.addEventListener('click', function () { zoomBy(ZOOM_FACTOR); });
+  zoomOutBtn.addEventListener('click', function () { zoomBy(1 / ZOOM_FACTOR); });
+  zoomResetBtn.addEventListener('click', function () { if (trimSlider) applyZoomWindow(0, videoDuration); });
+  panLeftBtn.addEventListener('click', function () { panBy(-1); });
+  panRightBtn.addEventListener('click', function () { panBy(1); });
 
   function buildTrim(duration) {
     if (trimSlider) return;
@@ -174,6 +254,7 @@
       startInput.value = s;
       endInput.value = e;
       readout.textContent = fmtHMS(s) + ' → ' + fmtHMS(e) + ' (' + fmt(e - s) + 's)';
+      refreshZoomButtons();
     });
 
     trimSlider.on('slide', function (values, handle) {
@@ -184,13 +265,12 @@
   function buildAll(duration) {
     if (videoDuration || !isFinite(duration) || duration <= 0) return;
     videoDuration = duration;
-    basePxPerSec = Math.max(0.02, scrollEl.clientWidth / duration);
     buildTrim(duration);
     // noUiSlider fires its initial 'update' event during create(), before our
     // listener is attached — force one explicit sync so hidden inputs and
     // the readout reflect the real starting state without requiring input.
     trimSlider.set(trimSlider.get());
-    resizeFilmstrip();
+    applyZoomWindow(0, duration);
   }
 
   if (video.readyState >= 1 && isFinite(video.duration)) {
@@ -199,8 +279,6 @@
   video.addEventListener('loadedmetadata', function () {
     buildAll(video.duration);
   });
-
-  zoomRange.addEventListener('input', resizeFilmstrip);
 
   video.addEventListener('click', function () {
     if (looping) {
@@ -416,20 +494,30 @@
   .htmx-indicator { display: none; }
   .htmx-request .htmx-indicator, .htmx-request.htmx-indicator { display: inline; }
 
-  #filmstrip-scroll {
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: auto;
-    scrollbar-color: rgba(255, 255, 255, 0.5) rgba(255, 255, 255, 0.08);
+  #filmstrip-inner { height: 3.5rem; overflow: hidden; }
+  #filmstrip-img { image-rendering: auto; -webkit-user-drag: none; max-width: none; }
+
+  .zoom-btn {
+    min-width: 2rem;
+    min-height: 2rem;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    line-height: 1;
   }
-  #filmstrip-scroll::-webkit-scrollbar { height: 12px; }
-  #filmstrip-scroll::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.08); }
-  #filmstrip-scroll::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.5);
-    border-radius: 0;
+  .zoom-btn:disabled { opacity: 0.3; }
+  .zoom-btn:not(:disabled):hover { background: #fff; color: #000; }
+  .zoom-btn:not(:disabled):active { background: rgba(255, 255, 255, 0.8); color: #000; }
+
+  /* flank the filmstrip itself so they read as "scroll this timeline" */
+  .pan-btn {
+    flex: 0 0 auto;
+    width: 2.25rem;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    color: rgba(255, 255, 255, 0.6);
+    line-height: 1;
   }
-  #filmstrip-scroll::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.7); }
-  #filmstrip-inner { height: 3.5rem; }
-  #filmstrip-img { image-rendering: auto; -webkit-user-drag: none; }
+  .pan-btn:disabled { opacity: 0.25; }
+  .pan-btn:not(:disabled):hover { background: #fff; color: #000; }
+  .pan-btn:not(:disabled):active { background: rgba(255, 255, 255, 0.8); color: #000; }
 
   #trim-slider.noUi-target {
     position: absolute;
@@ -441,11 +529,6 @@
     border: none;
     box-shadow: none;
     border-radius: 0;
-    /* the slider spans the whole filmstrip, but a touch anywhere on it
-       (background or connects) should fall through to the native scroll
-       of #filmstrip-scroll rather than be caught as a drag-tap gesture;
-       only the handles opt back in to receive touches, below */
-    pointer-events: none;
   }
   #trim-slider .noUi-connects { border-radius: 0; }
   /* shade the parts of the filmstrip outside the selected clip */
@@ -457,44 +540,34 @@
     background: transparent;
     border-left: 1px solid #fff;
     border-right: 1px solid #fff;
-    position: relative;
   }
-  /* dedicated grip to drag the whole clip on touch: the connect itself has
-     pointer-events: none (inherited) so swipes elsewhere scroll the
-     filmstrip, but this pseudo-element is hit-tested as part of the connect,
-     so touching it still reaches noUiSlider's own drag-the-connect handler */
-  #trim-slider .noUi-connect:nth-child(2)::after {
+  /* real touch targets (44px, per mobile a11y guidance) rather than the thin
+     visual handle — the visible white bar is centered inside a wider hit area */
+  #trim-slider .noUi-handle {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    border-radius: 0;
+    width: 44px;
+    height: 100%;
+    top: 0;
+    right: -22px;
+    cursor: grab;
+    touch-action: none;
+  }
+  #trim-slider .noUi-handle::before,
+  #trim-slider .noUi-handle::after {
     content: "";
     position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 28px;
-    height: 20px;
-    transform: translate(-50%, -50%);
-    background: rgba(255, 255, 255, 0.35);
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5) inset;
-    pointer-events: auto;
-    touch-action: none;
-    cursor: grab;
-  }
-  #trim-slider .noUi-connect:nth-child(2):active::after { cursor: grabbing; }
-  #trim-slider .noUi-handle {
-    background: #fff;
-    border: 1px solid #fff;
-    border-radius: 0;
-    box-shadow: none;
-    width: 10px;
-    /* noUiSlider's own .noUi-origin wrapper is hardcoded to height:0, so a
-       percentage height here would resolve against that and collapse to 0 */
-    height: 3.5rem;
     top: 0;
-    right: -5px;
-    cursor: grab;
-    touch-action: none;
-    pointer-events: auto;
+    bottom: 0;
+    width: 4px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: #fff;
+    border-radius: 0;
   }
-  #trim-slider .noUi-handle:before,
-  #trim-slider .noUi-handle:after { display: none; }
+  #trim-slider .noUi-handle::after { display: none; }
   #trim-slider .noUi-handle:active { cursor: grabbing; }
   #trim-slider .noUi-tooltip {
     background: #000;
