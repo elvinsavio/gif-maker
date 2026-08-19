@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -433,6 +434,8 @@ def generate():
         "download_name": download_name,
         "label": f"{format_hms(start)} – {format_hms(end)}",
         "size_mb": size_mb,
+        "start": start,
+        "end": end,
     })
 
     return render_template(
@@ -441,6 +444,7 @@ def generate():
         filename=download_name,
         disk_filename=disk_filename,
         size_mb=size_mb,
+        start=start,
     )
 
 
@@ -462,7 +466,60 @@ def make_chomp_clip(batch_dir, video, index, start, end, fps, width):
         "filename": out.name,
         "label": f"{format_hms(start)} – {format_hms(end)}",
         "size_mb": round(out.stat().st_size / (1024 * 1024), 2),
+        "start": start,
+        "end": end,
     }
+
+
+def run_chomp_job(batch_id, batch_dir, video, segments, fps, width):
+    """Runs on a background thread, independent of any HTTP connection, so
+    a chomp keeps going (and state.json keeps getting updated) even if the
+    browser tab or app that started it closes. Never call url_for() or touch
+    anything request-scoped in here — there's no request context on this
+    thread; /chomp-stream and /chomp-status build clip URLs themselves from
+    the plain data this writes. Also guards against a "clear all" (or a
+    fresh chomp) wiping batch_dir out from under this job and then having
+    it resurrect a stale state.json for a batch that no longer exists on
+    disk — every write is skipped once batch_dir is gone."""
+    def batch_still_active():
+        return batch_dir.is_dir()
+
+    done_clips = []
+    with ThreadPoolExecutor(max_workers=min(4, len(segments))) as pool:
+        futures = [
+            pool.submit(make_chomp_clip, batch_dir, video, i, s, e, fps, width)
+            for i, (s, e) in enumerate(segments)
+        ]
+        for fut in as_completed(futures):
+            try:
+                clip = fut.result()
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+                # OSError also covers batch_dir disappearing mid-write if a
+                # "clear all" (or a fresh chomp) races with this job
+                continue
+            if not batch_still_active():
+                continue
+            done_clips.append(clip)
+            write_chomp_state({
+                "batch_id": batch_id, "total": len(segments),
+                "clips": done_clips, "status": "running", "message": None,
+            })
+
+    if not batch_still_active():
+        return
+
+    if not done_clips:
+        write_chomp_state({
+            "batch_id": batch_id, "total": len(segments),
+            "clips": [], "status": "error",
+            "message": "Chomp failed: no clips were generated.",
+        })
+        return
+
+    write_chomp_state({
+        "batch_id": batch_id, "total": len(segments),
+        "clips": done_clips, "status": "done", "message": None,
+    })
 
 
 @app.route("/chomp-stream")
@@ -505,56 +562,64 @@ def chomp_stream():
     def sse(event_name, data):
         return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
-    def generate():
-        yield sse("total", {"total": len(segments), "batch_id": batch_id})
-        if not segments:
+    if not segments:
+        def empty_stream():
+            yield sse("total", {"total": 0, "batch_id": batch_id})
             yield sse("error", {"message": "Video too short to chomp."})
-            return
 
-        write_chomp_state({
-            "batch_id": batch_id, "total": len(segments),
-            "clips": [], "status": "running", "message": None,
-        })
+        return Response(
+            stream_with_context(empty_stream()),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
-        done_clips = []
-        done = 0
-        with ThreadPoolExecutor(max_workers=min(4, len(segments))) as pool:
-            futures = [
-                pool.submit(make_chomp_clip, batch_dir, video, i, s, e, fps, width)
-                for i, (s, e) in enumerate(segments)
-            ]
-            for fut in as_completed(futures):
-                done += 1
-                try:
-                    clip = fut.result()
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-                    yield sse("clip_error", {"done": done, "total": len(segments)})
-                    continue
-                done_clips.append(clip)
-                write_chomp_state({
-                    "batch_id": batch_id, "total": len(segments),
-                    "clips": done_clips, "status": "running", "message": None,
-                })
-                event_clip = dict(clip, done=done, total=len(segments), batch_id=batch_id)
+    write_chomp_state({
+        "batch_id": batch_id, "total": len(segments),
+        "clips": [], "status": "running", "message": None,
+    })
+    threading.Thread(
+        target=run_chomp_job,
+        args=(batch_id, batch_dir, video, segments, fps, width),
+        daemon=True,
+    ).start()
+
+    # this generator only *tails* state.json for as long as this particular
+    # client is connected — the actual work happens on the background thread
+    # above regardless, so closing the tab doesn't stop or lose progress
+    def tail_stream():
+        yield sse("total", {"total": len(segments), "batch_id": batch_id})
+        seen = 0
+        while True:
+            state = read_chomp_state()
+            if not state or state.get("batch_id") != batch_id:
+                yield sse("error", {"message": "Chomp was cleared."})
+                return
+
+            clips = state["clips"]
+            for clip in clips[seen:]:
+                event_clip = dict(clip, done=len(clips), total=state["total"], batch_id=batch_id)
                 event_clip["url"] = url_for("serve_chomp_clip", batch_id=batch_id, filename=clip["filename"])
                 yield sse("clip", event_clip)
+            seen = len(clips)
 
-        if not done_clips:
-            clear_chomps()
-            yield sse("error", {"message": "Chomp failed: no clips were generated."})
-            return
+            if state["status"] == "done":
+                yield sse("done", {
+                    "batch_id": batch_id,
+                    "download_all": url_for("download_chomp_all", batch_id=batch_id),
+                })
+                return
+            if state["status"] not in ("running", "done"):
+                yield sse("error", {"message": state.get("message") or "Chomp failed."})
+                return
+            if state["status"] == "running" and not batch_dir.is_dir():
+                # the batch directory vanished (e.g. a "clear all" while running)
+                yield sse("error", {"message": "Chomp was cleared."})
+                return
 
-        write_chomp_state({
-            "batch_id": batch_id, "total": len(segments),
-            "clips": done_clips, "status": "done", "message": None,
-        })
-        yield sse("done", {
-            "batch_id": batch_id,
-            "download_all": url_for("download_chomp_all", batch_id=batch_id),
-        })
+            time.sleep(0.5)
 
     return Response(
-        stream_with_context(generate()),
+        stream_with_context(tail_stream()),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

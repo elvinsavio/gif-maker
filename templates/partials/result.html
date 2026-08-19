@@ -1,5 +1,5 @@
-<div class="clip-card border border-white/30 p-3" data-filename="{{ disk_filename }}">
-  <img src="data:image/webp;base64,{{ gif_data }}" alt="generated clip" class="w-full border border-white/10 mb-2">
+<div class="clip-card border border-white/30 p-3" data-filename="{{ disk_filename }}" data-start="{{ start }}">
+  <img src="data:image/webp;base64,{{ gif_data }}" alt="generated clip" class="w-full border border-white/10 mb-2 cursor-pointer">
   <div class="flex items-center justify-between text-xs text-white/60">
     <span>{{ size_mb }} mb</span>
     <div class="flex items-center gap-1">

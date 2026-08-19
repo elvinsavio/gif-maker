@@ -43,19 +43,19 @@
     <div>
       <label class="block text-[10px] text-white/50 mb-0.5">fps</label>
       <input type="number" name="fps" value="15" min="1" max="30"
-             class="w-14 bg-black border border-white/40 px-1.5 py-1 text-sm focus:outline-none focus:border-white">
+             class="w-14 bg-black border border-white/40 px-1.5 py-1.5 text-sm focus:outline-none focus:border-white">
     </div>
     <div>
       <label class="block text-[10px] text-white/50 mb-0.5">width</label>
       <input type="number" name="width" value="480" min="120" max="1280"
-             class="w-20 bg-black border border-white/40 px-1.5 py-1 text-sm focus:outline-none focus:border-white">
+             class="w-20 bg-black border border-white/40 px-1.5 py-1.5 text-sm focus:outline-none focus:border-white">
     </div>
 
-    <button class="border border-white px-3 py-1.5 text-sm hover:bg-white hover:text-black transition" type="submit">
+    <button class="border border-white/40 px-3 py-1.5 text-sm hover:bg-white hover:text-black transition" type="submit">
       make gif
     </button>
     <button type="button" id="chomp-btn"
-            class="border border-white px-3 py-1.5 text-sm hover:bg-white hover:text-black transition"
+            class="border border-white/40 px-3 py-1.5 text-sm hover:bg-white hover:text-black transition"
             title="split the whole video into 10s clips">
       chomp
     </button>
@@ -357,8 +357,9 @@
     item.className = 'border border-white/10';
     item.dataset.filename = clip.filename;
     item.dataset.batchId = clip.batch_id || '';
+    item.dataset.start = clip.start;
     item.innerHTML =
-      '<img src="' + escapeHtml(clip.url) + '" alt="" class="w-full block">' +
+      '<img src="' + escapeHtml(clip.url) + '" alt="" class="w-full block cursor-pointer">' +
       '<div class="flex items-center justify-between text-[10px] text-white/50 px-1 py-1">' +
         '<span>' + escapeHtml(clip.label) + ' &middot; ' + clip.size_mb + ' mb</span>' +
         '<div class="flex items-center gap-1">' +
@@ -490,8 +491,9 @@
     var card = document.createElement('div');
     card.className = 'clip-card border border-white/30 p-3';
     card.dataset.filename = clip.filename;
+    card.dataset.start = clip.start;
     card.innerHTML =
-      '<img src="' + escapeHtml(clip.url) + '" alt="generated clip" class="w-full border border-white/10 mb-2">' +
+      '<img src="' + escapeHtml(clip.url) + '" alt="generated clip" class="w-full border border-white/10 mb-2 cursor-pointer">' +
       '<div class="flex items-center justify-between text-xs text-white/60">' +
         '<span>' + clip.size_mb + ' mb</span>' +
         '<div class="flex items-center gap-1">' +
@@ -516,6 +518,18 @@
   // htmx-swapped result of /generate) and the client-rendered ones below,
   // without needing to rebind listeners each time a card is added
   resultEl.addEventListener('click', function (e) {
+    // clicking a clip's thumbnail seeks the main video preview to where
+    // that clip came from, instead of only being reachable through delete
+    if (e.target.tagName === 'IMG') {
+      var seekTarget = e.target.closest('[data-start]');
+      var seekTime = seekTarget ? parseFloat(seekTarget.dataset.start) : NaN;
+      if (!isNaN(seekTime)) {
+        video.currentTime = seekTime;
+        video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
+    }
+
     var clipDelBtn = e.target.closest('.delete-clip-btn');
     if (clipDelBtn) {
       var clipCard = clipDelBtn.closest('.clip-card');
