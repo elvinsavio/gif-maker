@@ -54,6 +54,11 @@
     <button class="border border-white px-3 py-1.5 text-sm hover:bg-white hover:text-black transition" type="submit">
       make gif
     </button>
+    <button type="button" id="chomp-btn"
+            class="border border-white px-3 py-1.5 text-sm hover:bg-white hover:text-black transition"
+            title="split the whole video into 10s clips">
+      chomp
+    </button>
     <span id="generating" class="htmx-indicator text-xs text-white/50">generating…</span>
   </form>
 
@@ -96,6 +101,9 @@
   var endInput = document.getElementById('end-input');
   var readout = document.getElementById('trim-readout');
   var loopTimer = document.getElementById('loop-timer');
+  var gifForm = document.getElementById('gif-form');
+  var chompBtn = document.getElementById('chomp-btn');
+  var resultEl = document.getElementById('result');
 
   var trimSlider = null;
   var looping = false;
@@ -222,6 +230,184 @@
   video.addEventListener('pause', function () {
     if (looping) stopLoop();
   });
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function createChompCard() {
+    var card = document.createElement('div');
+    card.className = 'border border-white/30 p-3';
+    card.innerHTML =
+      '<div class="flex items-center justify-between text-xs text-white/60 mb-2">' +
+        '<span class="chomp-status">chomping&hellip; 0/?</span>' +
+        '<a class="chomp-download-all hidden border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition" href="#">download all</a>' +
+      '</div>' +
+      '<div class="h-1 bg-white/10 mb-2"><div class="chomp-progress h-full bg-white/70" style="width:0%"></div></div>' +
+      '<div class="chomp-grid grid grid-cols-2 sm:grid-cols-3 gap-2"></div>';
+    resultEl.insertBefore(card, resultEl.firstChild);
+    return {
+      card: card,
+      statusEl: card.querySelector('.chomp-status'),
+      progressEl: card.querySelector('.chomp-progress'),
+      downloadAllEl: card.querySelector('.chomp-download-all'),
+      gridEl: card.querySelector('.chomp-grid'),
+    };
+  }
+
+  function renderChompClip(gridEl, clip) {
+    var item = document.createElement('div');
+    item.className = 'border border-white/10';
+    item.innerHTML =
+      '<img src="' + escapeHtml(clip.url) + '" alt="" class="w-full block">' +
+      '<div class="flex items-center justify-between text-[10px] text-white/50 px-1 py-1">' +
+        '<span>' + escapeHtml(clip.label) + ' &middot; ' + clip.size_mb + ' mb</span>' +
+        '<a class="border border-white/30 px-1 hover:bg-white hover:text-black transition" ' +
+           'href="' + escapeHtml(clip.url) + '" download="' + escapeHtml(clip.filename) + '">download</a>' +
+      '</div>';
+    gridEl.appendChild(item);
+  }
+
+  function setChompProgress(ui, done, total, failedNote) {
+    var pct = total ? Math.round((done / total) * 100) : 0;
+    ui.progressEl.style.width = pct + '%';
+    ui.statusEl.textContent = 'chomping… ' + done + '/' + total + (failedNote || '');
+  }
+
+  function finishChompUi(ui, downloadAllUrl, clipCount) {
+    ui.statusEl.textContent = 'chomp done · ' + clipCount + ' clips';
+    ui.downloadAllEl.href = downloadAllUrl;
+    ui.downloadAllEl.classList.remove('hidden');
+  }
+
+  function startChomp() {
+    if (chompBtn.disabled) return;
+    chompBtn.disabled = true;
+
+    var fps = gifForm.querySelector('[name="fps"]').value;
+    var width = gifForm.querySelector('[name="width"]').value;
+    var csrfToken = gifForm.querySelector('[name="csrf_token"]').value;
+
+    var ui = createChompCard();
+    var params = new URLSearchParams({ fps: fps, width: width, csrf_token: csrfToken });
+    var source = new EventSource('{{ url_for("chomp_stream") }}?' + params.toString());
+
+    source.addEventListener('total', function (e) {
+      var data = JSON.parse(e.data);
+      if (!data.total) {
+        ui.statusEl.textContent = 'chomp: nothing to do';
+        source.close();
+        chompBtn.disabled = false;
+      } else {
+        setChompProgress(ui, 0, data.total);
+      }
+    });
+
+    source.addEventListener('clip', function (e) {
+      var clip = JSON.parse(e.data);
+      setChompProgress(ui, clip.done, clip.total);
+      renderChompClip(ui.gridEl, clip);
+    });
+
+    source.addEventListener('clip_error', function (e) {
+      var data = JSON.parse(e.data);
+      setChompProgress(ui, data.done, data.total, ' (1 failed)');
+    });
+
+    source.addEventListener('done', function (e) {
+      var data = JSON.parse(e.data);
+      finishChompUi(ui, data.download_all, ui.gridEl.children.length);
+      source.close();
+      chompBtn.disabled = false;
+    });
+
+    source.addEventListener('error', function (e) {
+      var message = 'chomp connection lost';
+      if (e.data) {
+        try { message = JSON.parse(e.data).message || message; } catch (err) {}
+      }
+      ui.statusEl.textContent = message;
+      source.close();
+      chompBtn.disabled = false;
+    });
+  }
+
+  function pollChompStatus(ui, renderedCount) {
+    fetch('{{ url_for("chomp_status") }}')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        for (; renderedCount < data.clips.length; renderedCount++) {
+          renderChompClip(ui.gridEl, data.clips[renderedCount]);
+        }
+        setChompProgress(ui, data.clips.length, data.total);
+
+        if (data.status === 'running') {
+          setTimeout(function () { pollChompStatus(ui, renderedCount); }, 1500);
+        } else if (data.status === 'done') {
+          finishChompUi(ui, data.download_all, data.clips.length);
+          chompBtn.disabled = false;
+        } else {
+          ui.statusEl.textContent = data.message || 'chomp failed';
+          chompBtn.disabled = false;
+        }
+      })
+      .catch(function () {
+        ui.statusEl.textContent = 'chomp status check failed';
+        chompBtn.disabled = false;
+      });
+  }
+
+  function resumeChompIfPresent() {
+    fetch('{{ url_for("chomp_status") }}')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.status === 'empty') return;
+
+        chompBtn.disabled = true;
+        var ui = createChompCard();
+        data.clips.forEach(function (clip) { renderChompClip(ui.gridEl, clip); });
+        setChompProgress(ui, data.clips.length, data.total);
+
+        if (data.status === 'running') {
+          setTimeout(function () { pollChompStatus(ui, data.clips.length); }, 1500);
+        } else if (data.status === 'done') {
+          finishChompUi(ui, data.download_all, data.clips.length);
+          chompBtn.disabled = false;
+        } else {
+          ui.statusEl.textContent = data.message || 'chomp failed';
+          chompBtn.disabled = false;
+        }
+      })
+      .catch(function () {});
+  }
+
+  function renderPersistedClip(clip) {
+    var card = document.createElement('div');
+    card.className = 'border border-white/30 p-3';
+    card.innerHTML =
+      '<img src="' + escapeHtml(clip.url) + '" alt="generated clip" class="w-full border border-white/10 mb-2">' +
+      '<div class="flex items-center justify-between text-xs text-white/60">' +
+        '<span>' + clip.size_mb + ' mb</span>' +
+        '<a class="border border-white/40 px-2 py-1 hover:bg-white hover:text-black transition" ' +
+           'href="' + escapeHtml(clip.url) + '" download="' + escapeHtml(clip.download_name) + '">download</a>' +
+      '</div>';
+    resultEl.appendChild(card);
+  }
+
+  function restorePersistedClips() {
+    fetch('{{ url_for("clip_list") }}')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        data.clips.forEach(renderPersistedClip);
+      })
+      .catch(function () {});
+  }
+
+  chompBtn.addEventListener('click', startChomp);
+  restorePersistedClips();
+  resumeChompIfPresent();
 })();
 </script>
 {% endif %}
